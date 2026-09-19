@@ -3,6 +3,8 @@
 > **The ultra-lightweight, production-grade OpenAI-compatible Agent Gateway.**
 > Pure Python. Zero bloat. Native `/v1/chat/completions` SSE streaming with tool execution.
 
+> **English | [中文文档](README_zh.md)**
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com)
