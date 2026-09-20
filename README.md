@@ -1,6 +1,6 @@
 # ⚡ Fast Agent Loop
 
-> **The ultra-lightweight, production-grade OpenAI-compatible Agent Gateway.**
+> **A lightweight OpenAI-compatible Agent Gateway for local tool execution.**
 > Pure Python. Zero bloat. Native `/v1/chat/completions` SSE streaming with tool execution.
 
 > **English | [中文文档](README_zh.md)**
@@ -18,13 +18,13 @@ Most agent runtimes (LangChain, AutoGPT, CrewAI, or heavy custom daemons) suffer
 - **Frontend Friction**: Hard to connect to standard chat UIs (NextChat, Open-WebUI, Streamlit, LibreChat) that expect native OpenAI streaming (`text/event-stream`).
 - **Production Pitfalls**: LLM loops often throw 500 errors when reaching max rounds, choke on huge tool outputs, or suffer from concurrent session state corruption.
 
-**Fast Agent Loop** is a single-file, 400-line asynchronous agent gateway that bridges any upstream LLM (OpenAI, DeepSeek, Kimi, Anthropic via adapter) with arbitrary local or remote tools, providing rock-solid stability.
+**Fast Agent Loop** is a compact asynchronous agent gateway that bridges an OpenAI-compatible upstream LLM with registered local or remote tools.
 
 ---
 
 ## 🚀 Key Features
 
-- **Standard OpenAI Streaming**: Full `/v1/chat/completions` SSE compatibility. Streams `delta.content` directly to clients and suppresses internal `[DONE]` tokens between tool rounds.
+- **OpenAI-style Streaming**: Provides a `/v1/chat/completions` SSE endpoint, streams `delta.content`, and suppresses internal `[DONE]` tokens between tool rounds.
 - **Zero Framework Bloat**: Built purely on top of **FastAPI**, **Uvicorn**, and **HTTPX**.
 - **Safe Context Compression**: Protects upstream token limits by compactly serializing JSON outputs. Automatically rejects outputs >32KB with a structured notice instead of violently slicing numbers or strings.
 - **Smooth Round Exhaustion**: Reaching `MAX_ROUNDS` never crashes with HTTP 500. The agent disables tool calling and enters a graceful "best-effort summary" turn.
@@ -42,7 +42,7 @@ Most agent runtimes (LangChain, AutoGPT, CrewAI, or heavy custom daemons) suffer
 ```bash
 git clone https://github.com/<your-username>/fast-agent-loop.git
 cd fast-agent-loop
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### 2. Configure Environment
@@ -131,9 +131,13 @@ for chunk in stream:
 | `GATEWAY_API_KEY` | `""` (Open) | Optional Bearer token required for gateway clients |
 | `PORT` | `8000` | Gateway HTTP listen port |
 | `AGENT_MAX_ROUNDS` | `10` | Maximum continuous tool rounds before forcing summary |
+| `AGENT_MAX_HISTORY` | `10` | Maximum stored messages per stateful session |
 | `AGENT_TOOL_CONCURRENCY` | `4` | Maximum parallel tool execution concurrency |
 | `AGENT_TOOL_TIMEOUT` | `30.0` | Timeout in seconds for individual tool calls |
 | `AGENT_MAX_SESSIONS` | `500` | In-memory LRU session history cache size |
+
+`X-Session-Id` enables server-side history. In that mode, send only the new turn in
+`messages`; clients that already send the complete conversation should omit the header.
 
 ---
 

@@ -50,17 +50,40 @@ DEFAULT_SYSTEM_PROMPT = os.getenv(
 
 # ── Concurrency & Session State ─────────────────────────────
 _TOOL_SEM = asyncio.Semaphore(TOOL_CONCURRENCY)
-_session_locks: Dict[str, asyncio.Lock] = {}
+_session_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
 _session_histories: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
-    if session_id not in _session_locks:
-        if len(_session_locks) >= MAX_SESSIONS:
-            oldest = next(iter(_session_locks))
-            del _session_locks[oldest]
-        _session_locks[session_id] = asyncio.Lock()
-    return _session_locks[session_id]
+    lock = _session_locks.get(session_id)
+    if lock is not None:
+        _session_locks.move_to_end(session_id)
+        return lock
+
+    # Never evict a held lock: replacing it would allow two requests for the
+    # same session to execute concurrently. If every lock is busy, temporary
+    # overflow is safer and is pruned when streams complete.
+    if len(_session_locks) >= MAX_SESSIONS:
+        for key, candidate in list(_session_locks.items()):
+            if not candidate.locked():
+                del _session_locks[key]
+                break
+
+    lock = asyncio.Lock()
+    _session_locks[session_id] = lock
+    return lock
+
+
+def _prune_session_locks() -> None:
+    while len(_session_locks) > MAX_SESSIONS:
+        removed = False
+        for key, lock in list(_session_locks.items()):
+            if not lock.locked():
+                del _session_locks[key]
+                removed = True
+                break
+        if not removed:
+            break
 
 
 def _get_session_history(session_id: str) -> List[Dict[str, Any]]:
@@ -88,6 +111,11 @@ class ToolRegistry:
         tool_name = schema.get("function", {}).get("name")
         if not tool_name:
             raise ValueError("Invalid schema: function.name is required")
+        self.schemas = [
+            existing
+            for existing in self.schemas
+            if existing.get("function", {}).get("name") != tool_name
+        ]
         self.schemas.append(schema)
         self.handlers[tool_name] = handler
 
@@ -183,6 +211,12 @@ async def _agent_stream_generator(
 
     for round_idx in range(MAX_ROUNDS):
         is_final_round = (round_idx == MAX_ROUNDS - 1)
+        if is_final_round:
+            conversation.append({
+                "role": "system",
+                "content": "Maximum tool rounds reached. Do not call more tools. "
+                           "Summarize the best supported conclusion from the results so far.",
+            })
         payload: Dict[str, Any] = {
             "model": MODEL_NAME,
             "messages": conversation,
@@ -289,11 +323,6 @@ async def _agent_stream_generator(
 
         # Case C: Round limit reached
         if is_final_round:
-            conversation.append({
-                "role": "system",
-                "content": "Maximum tool rounds reached. Please summarize your final conclusion "
-                           "based on verified information gathered so far.",
-            })
             final_assistant_content = round_content
             answered = True
             break
@@ -344,7 +373,35 @@ async def chat_completions(
     if not isinstance(messages, list) or not messages:
         raise HTTPException(status_code=400, detail="'messages' must be a non-empty list")
 
-    tools = body.get("tools") or tool_registry.get_schemas()
+    requested_tools = body.get("tools")
+    if requested_tools is not None and not isinstance(requested_tools, list):
+        raise HTTPException(status_code=400, detail="'tools' must be a list")
+
+    registered_tools = {
+        schema.get("function", {}).get("name"): schema
+        for schema in tool_registry.get_schemas()
+    }
+    if requested_tools is not None:
+        requested_names = []
+        for schema in requested_tools:
+            if not isinstance(schema, dict):
+                raise HTTPException(status_code=400, detail="Each tool must be an object")
+            name = schema.get("function", {}).get("name")
+            if not name:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Each tool must define function.name",
+                )
+            requested_names.append(name)
+        unknown_names = [name for name in requested_names if name not in registered_tools]
+        if unknown_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unregistered tools requested: {', '.join(str(n) for n in unknown_names)}",
+            )
+        tools = [registered_tools[name] for name in requested_names]
+    else:
+        tools = list(registered_tools.values())
     system_prompt = body.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
 
     # Stream response
@@ -352,9 +409,12 @@ async def chat_completions(
         async def locked_stream():
             if session_id:
                 lock = _get_session_lock(session_id)
-                async with lock:
-                    async for chunk in _agent_stream_generator(messages, session_id, tools, system_prompt):
-                        yield chunk
+                try:
+                    async with lock:
+                        async for chunk in _agent_stream_generator(messages, session_id, tools, system_prompt):
+                            yield chunk
+                finally:
+                    _prune_session_locks()
             else:
                 async for chunk in _agent_stream_generator(messages, session_id, tools, system_prompt):
                     yield chunk
@@ -370,16 +430,28 @@ async def chat_completions(
         )
 
     # Non-streaming fallback
-    collected_text = ""
-    async for chunk in _agent_stream_generator(messages, session_id, tools, system_prompt):
-        if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
-            try:
-                obj = json.loads(chunk[6:])
-                delta = obj.get("choices", [{}])[0].get("delta", {})
-                if delta.get("content"):
-                    collected_text += delta["content"]
-            except Exception:
-                pass
+    async def collect_response() -> str:
+        collected = ""
+        async for chunk in _agent_stream_generator(messages, session_id, tools, system_prompt):
+            if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
+                try:
+                    obj = json.loads(chunk[6:])
+                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    if delta.get("content"):
+                        collected += delta["content"]
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    continue
+        return collected
+
+    if session_id:
+        lock = _get_session_lock(session_id)
+        try:
+            async with lock:
+                collected_text = await collect_response()
+        finally:
+            _prune_session_locks()
+    else:
+        collected_text = await collect_response()
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",

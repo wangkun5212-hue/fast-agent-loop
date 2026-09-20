@@ -2,7 +2,7 @@
 
 > **[English](README.md) | 中文**
 
-> **超轻量、生产级的 OpenAI 兼容 Agent 网关。**
+> **用于本地工具执行的轻量 OpenAI 兼容 Agent 网关。**
 > 纯 Python，零臃肿。原生 `/v1/chat/completions` SSE 流式输出 + 工具执行。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -18,13 +18,13 @@
 - **前端接入困难**：难以对接期待原生 OpenAI 流式协议（`text/event-stream`）的标准聊天 UI（NextChat、Open-WebUI、Streamlit、LibreChat 等）。
 - **生产环境踩坑**：LLM 循环达到最大轮次时直接抛 500；工具输出过大把上下文撑爆；并发会话状态互相污染。
 
-**Fast Agent Loop** 是一个单文件、约 400 行的异步 Agent 网关，能把任意上游 LLM（OpenAI、DeepSeek、Kimi、经适配的 Anthropic 等）与任意本地/远程工具桥接起来，提供磐石般的稳定性。
+**Fast Agent Loop** 是一个紧凑的异步 Agent 网关，可把 OpenAI 兼容的上游 LLM 与已注册的本地或远程工具桥接起来。
 
 ---
 
 ## 🚀 核心特性
 
-- **标准 OpenAI 流式协议**：完整兼容 `/v1/chat/completions` SSE。直接向客户端流式输出 `delta.content`，并在工具调用轮次之间抑制内部 `[DONE]` 标记。
+- **OpenAI 风格流式协议**：提供 `/v1/chat/completions` SSE 端点，直接向客户端流式输出 `delta.content`，并在工具调用轮次之间抑制内部 `[DONE]` 标记。
 - **零框架臃肿**：仅基于 **FastAPI**、**Uvicorn** 和 **HTTPX** 构建。
 - **安全的上下文压缩**：通过紧凑的 JSON 序列化保护上游 token 上限。工具输出超过 32KB 时自动以结构化提示拒绝，而不是粗暴截断数字或字符串。
 - **平滑的轮次耗尽**：达到 `MAX_ROUNDS` 永远不会导致 HTTP 500 崩溃。Agent 会自动禁用工具调用，优雅地进入「尽力总结」轮。
@@ -42,7 +42,7 @@
 ```bash
 git clone https://github.com/wangkun5212-hue/fast-agent-loop.git
 cd fast-agent-loop
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### 2. 配置环境变量
@@ -131,9 +131,13 @@ for chunk in stream:
 | `GATEWAY_API_KEY` | `""`（开放） | 可选，要求网关客户端携带的 Bearer Token |
 | `PORT` | `8000` | 网关 HTTP 监听端口 |
 | `AGENT_MAX_ROUNDS` | `10` | 强制总结前的最大连续工具调用轮次 |
+| `AGENT_MAX_HISTORY` | `10` | 每个有状态会话最多保留的消息数 |
 | `AGENT_TOOL_CONCURRENCY` | `4` | 工具并行执行的最大并发数 |
 | `AGENT_TOOL_TIMEOUT` | `30.0` | 单次工具调用超时时间（秒） |
 | `AGENT_MAX_SESSIONS` | `500` | 内存中 LRU 会话历史缓存大小 |
+
+`X-Session-Id` 会启用服务端历史记录。启用后，`messages` 只发送当前新增轮次；
+如果客户端本身已经发送完整对话历史，请不要携带该请求头。
 
 ---
 

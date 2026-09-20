@@ -23,7 +23,7 @@ async def search_web(query: str) -> dict:
     return {
         "query": query,
         "results": [
-            {"title": "Fast Agent Loop Release", "snippet": "A production-grade OpenAI-compatible gateway."}
+            {"title": "Fast Agent Loop Release", "snippet": "A lightweight OpenAI-compatible gateway."}
         ]
     }
 
