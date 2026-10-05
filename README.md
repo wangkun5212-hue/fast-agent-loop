@@ -40,7 +40,7 @@ Most agent runtimes (LangChain, AutoGPT, CrewAI, or heavy custom daemons) suffer
 ### 1. Installation
 
 ```bash
-git clone https://github.com/<your-username>/fast-agent-loop.git
+git clone https://github.com/wangkun5212-hue/fast-agent-loop.git
 cd fast-agent-loop
 pip install -e .
 ```
