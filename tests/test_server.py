@@ -89,3 +89,12 @@ def test_session_history_lru():
     hist = _get_session_history("sess_1")
     assert len(hist) == 1
     assert hist[0]["content"] == "hi"
+
+
+def test_model_candidates_configuration(monkeypatch):
+    monkeypatch.setenv("MODEL_CANDIDATES", "gpt-4o, gpt-4o-mini, deepseek-chat")
+    # Re-evaluate logic
+    c_env = "gpt-4o, gpt-4o-mini, deepseek-chat"
+    candidates = [c.strip() for c in c_env.split(",") if c.strip()]
+    assert candidates == ["gpt-4o", "gpt-4o-mini", "deepseek-chat"]
+

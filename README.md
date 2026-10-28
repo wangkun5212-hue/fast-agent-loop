@@ -28,6 +28,7 @@ Most agent runtimes (LangChain, AutoGPT, CrewAI, or heavy custom daemons) suffer
 - **Zero Framework Bloat**: Built purely on top of **FastAPI**, **Uvicorn**, and **HTTPX**.
 - **Safe Context Compression**: Protects upstream token limits by compactly serializing JSON outputs. Automatically rejects outputs >32KB with a structured notice instead of violently slicing numbers or strings.
 - **Smooth Round Exhaustion**: Reaching `MAX_ROUNDS` never crashes with HTTP 500. The agent disables tool calling and enters a graceful "best-effort summary" turn.
+- **Model Fallback Chain & Upstream Diagnostics**: Configure candidate models via `MODEL_CANDIDATES`. Automatically falls back to backup models on upstream failure before tokens are yielded, and captures response body details for 4xx/5xx errors.
 - **Concurrency & Session Safety**:
   - **Connection Pool**: Module-level shared `httpx.AsyncClient` eliminates TLS handshake latency (~200ms saved per round).
   - **Tool Semaphore**: Enforces bounded parallel tool execution (default max 4 concurrent calls) to protect downstream services.

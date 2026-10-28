@@ -33,6 +33,9 @@ GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", "")
 MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+# Optional comma-separated fallback candidate models, e.g. "gpt-4o-mini,deepseek-chat,claude-3-5-haiku"
+_candidates_env = os.getenv("MODEL_CANDIDATES", "")
+MODEL_CANDIDATES = [c.strip() for c in _candidates_env.split(",") if c.strip()] if _candidates_env else [MODEL_NAME]
 PORT = int(os.getenv("PORT", "8000"))
 
 MAX_ROUNDS = int(os.getenv("AGENT_MAX_ROUNDS", "10"))
@@ -217,73 +220,107 @@ async def _agent_stream_generator(
                 "content": "Maximum tool rounds reached. Do not call more tools. "
                            "Summarize the best supported conclusion from the results so far.",
             })
-        payload: Dict[str, Any] = {
-            "model": MODEL_NAME,
-            "messages": conversation,
-            "stream": True,
-        }
-
-        if tools_schema and not is_final_round:
-            payload["tools"] = tools_schema
-            payload["tool_choice"] = "auto"
-
-        headers = {
-            "Authorization": f"Bearer {MODEL_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            req = client.build_request("POST", f"{MODEL_BASE_URL}/chat/completions", json=payload, headers=headers)
-            resp = await client.send(req, stream=True)
-            resp.raise_for_status()
-        except Exception as e:
-            err_msg = f"Upstream LLM error: {str(e)}"
-            yield f"data: {json.dumps({'choices': [{'delta': {'content': err_msg}}]}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-
         current_tool_calls: Dict[int, Dict[str, Any]] = {}
         round_content = ""
+        round_failed = False
 
-        async for line in resp.aiter_lines():
-            if not line.startswith("data: "):
-                continue
-            data_str = line[6:].strip()
-            if data_str == "[DONE]":
-                continue
+        # Attempt primary model, fallback to candidate models if failure happens before any tokens are yielded
+        for attempt, model_to_use in enumerate(MODEL_CANDIDATES):
+            payload: Dict[str, Any] = {
+                "model": model_to_use,
+                "messages": conversation,
+                "stream": True,
+            }
+            if tools_schema and not is_final_round:
+                payload["tools"] = tools_schema
+                payload["tool_choice"] = "auto"
+
+            headers = {
+                "Authorization": f"Bearer {MODEL_API_KEY}",
+                "Content-Type": "application/json",
+            }
+
+            attempt_yielded = False
+            current_tool_calls.clear()
+            round_content = ""
 
             try:
-                chunk = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
+                req = client.build_request("POST", f"{MODEL_BASE_URL}/chat/completions", json=payload, headers=headers)
+                resp = await client.send(req, stream=True)
+                resp.raise_for_status()
 
-            choices = chunk.get("choices", [])
-            if not choices:
-                continue
-            delta = choices[0].get("delta", {})
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        continue
 
-            # Stream text content
-            if delta.get("content"):
-                round_content += delta["content"]
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
 
-            # Accumulate tool calls
-            if delta.get("tool_calls"):
-                for tc in delta["tool_calls"]:
-                    idx = tc.get("index", 0)
-                    if idx not in current_tool_calls:
-                        current_tool_calls[idx] = {
-                            "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    fn = tc.get("function", {})
-                    if fn.get("name"):
-                        current_tool_calls[idx]["function"]["name"] += fn["name"]
-                    if fn.get("arguments"):
-                        current_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
 
-        await resp.aclose()
+                    # Stream text content
+                    if delta.get("content"):
+                        round_content += delta["content"]
+                        attempt_yielded = True
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+                    # Accumulate tool calls
+                    if delta.get("tool_calls"):
+                        for tc in delta["tool_calls"]:
+                            idx = tc.get("index", 0)
+                            if idx not in current_tool_calls:
+                                current_tool_calls[idx] = {
+                                    "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                current_tool_calls[idx]["function"]["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                current_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+
+                await resp.aclose()
+                # Completed this round successfully with this model
+                break
+            except Exception as e:
+                # Capture detailed HTTP status and response body for diagnostics
+                detail = ""
+                err_resp = getattr(e, "response", None)
+                if err_resp is not None:
+                    detail = f" status={err_resp.status_code}"
+                    try:
+                        body = (err_resp.text or "").strip().replace("\n", " ")[:300]
+                    except Exception:
+                        body = ""
+                    if body:
+                        detail += f" body={body}"
+
+                err_summary = f"Upstream LLM error ({model_to_use}): {type(e).__name__} {str(e)}{detail}"
+                sys.stderr.write(f"[fast_agent_loop] {err_summary}\n")
+
+                fallback_left = attempt + 1 < len(MODEL_CANDIDATES)
+                if attempt_yielded or not fallback_left:
+                    # If we already yielded partial tokens to the caller or have no remaining candidate models
+                    err_msg = f"Upstream LLM error: {type(e).__name__} {str(e)}{detail}"
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': err_msg}}]}, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    round_failed = True
+                    break
+
+                # Otherwise, cleanly fall back to next candidate model
+                sys.stderr.write(f"[fast_agent_loop] falling back to candidate: {MODEL_CANDIDATES[attempt + 1]}\n")
+
+        if round_failed:
+            return
 
         # Case A: Model returned text response
         if round_content and not current_tool_calls:
@@ -345,6 +382,7 @@ async def health():
     return {
         "status": "ok",
         "model": MODEL_NAME,
+        "models": MODEL_CANDIDATES,
         "tools_registered": len(tool_registry.get_schemas()),
     }
 
