@@ -28,6 +28,7 @@
 - **零框架臃肿**：仅基于 **FastAPI**、**Uvicorn** 和 **HTTPX** 构建。
 - **安全的上下文压缩**：通过紧凑的 JSON 序列化保护上游 token 上限。工具输出超过 32KB 时自动以结构化提示拒绝，而不是粗暴截断数字或字符串。
 - **平滑的轮次耗尽**：达到 `MAX_ROUNDS` 永远不会导致 HTTP 500 崩溃。Agent 会自动禁用工具调用，优雅地进入「尽力总结」轮。
+- **模型 Fallback 容灾链与上游错误精细诊断 (v0.2.0)**：通过 `MODEL_CANDIDATES` 配置候选模型列表。首选模型出错且尚未吐出 Token 时自动无缝降级切换至备用模型；4xx/5xx 上游错误自动提取前 300 字符响应体带入日志，排障零黑盒。
 - **并发与会话安全**：
   - **连接池**：模块级共享 `httpx.AsyncClient`，消除 TLS 握手延迟（每轮省约 200ms）。
   - **工具信号量**：限制并行工具执行数量（默认最多 4 路并发），保护下游服务。
@@ -128,6 +129,7 @@ for chunk in stream:
 | `MODEL_BASE_URL` | `https://api.openai.com/v1` | 上游 OpenAI 兼容 LLM 端点 |
 | `MODEL_API_KEY` | *（必填）* | 上游模型 API Key |
 | `MODEL_NAME` | `gpt-4o-mini` | 上游模型标识 |
+| `MODEL_CANDIDATES` | `""` | 逗号分隔的候选模型降级链（如 `gpt-4o,gpt-4o-mini`） |
 | `GATEWAY_API_KEY` | `""`（开放） | 可选，要求网关客户端携带的 Bearer Token |
 | `PORT` | `8000` | 网关 HTTP 监听端口 |
 | `AGENT_MAX_ROUNDS` | `10` | 强制总结前的最大连续工具调用轮次 |
